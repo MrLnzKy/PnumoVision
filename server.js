@@ -3,10 +3,13 @@ const bcrypt = require("bcrypt");
 const mysql = require("mysql2");
 const jwt = require("jsonwebtoken");
 const cors = require("cors");
+const bodyParser = require("body-parser");
 
 const app = express();
+app.use(bodyParser.urlencoded({ extended: true }));
 app.use(express.json());
 app.use(cors());
+app.use(bodyParser.text());
 
 const db = mysql.createConnection({
   host: "34.101.242.156",
