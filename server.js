@@ -4,6 +4,9 @@ const mysql = require("mysql2");
 const jwt = require("jsonwebtoken");
 const cors = require("cors");
 const bodyParser = require("body-parser");
+const multer = require("multer");
+const path = require("path");
+const fs = require("fs");
 
 const app = express();
 app.use(bodyParser.urlencoded({ extended: true }));
@@ -20,6 +23,20 @@ const db = mysql.createConnection({
 
 const jwtSecret = "2lmBFtAY0HybUp1L74qGTerX1YgIgNHn";
 const PORT = process.env.PORT || 8080;
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const uploadDir = path.join(__dirname, "uploads");
+    if (!fs.existsSync(uploadDir)) {
+      fs.mkdirSync(uploadDir);
+    }
+    cb(null, "uploads/");
+  },
+  filename: (req, file, cb) => {
+    cb(null, `${Date.now()}-${file.originalname}`);
+  },
+});
+const upload = multer({ storage });
 
 app.get("/", (req, res) => {
   res.send("Welcome to the API!");
@@ -42,16 +59,32 @@ const authenticateToken = (req, res, next) => {
   try {
     const decoded = jwt.verify(token, jwtSecret);
     req.user = decoded;
+
+    // Check if the token is blacklisted
+    db.query(
+      "SELECT token FROM blacklist WHERE token = ?",
+      [token],
+      (err, results) => {
+        if (err) {
+          return res.status(500).json({ error: err.message });
+        }
+
+        if (results.length > 0) {
+          return res.status(401).json({ error: "Token is blacklisted" });
+        }
+
+        next();
+      }
+    );
   } catch (err) {
     return res.status(401).json({ error: "Invalid Token" });
   }
-
-  next();
 };
 
 // Endpoint for registration
-app.post("/register", async (req, res) => {
+app.post("/register", upload.single("profile_picture"), async (req, res) => {
   const { name, email, password } = req.body;
+  const profilePicture = req.file ? req.file.path : null;
 
   if (!name || !email || !password) {
     return res.status(400).json({ error: "All fields are required" });
@@ -65,19 +98,23 @@ app.post("/register", async (req, res) => {
       }
 
       if (results.length > 0) {
-        return res.status(409).json({ error: "Email already in use" }); // Menggunakan status 409 untuk conflict
+        return res.status(409).json({ error: "Email already in use" });
       }
 
       const hashedPassword = await bcrypt.hash(password, 10);
       const insertSql =
-        "INSERT INTO users (name, email, password) VALUES (?, ?, ?)";
-      db.query(insertSql, [name, email, hashedPassword], (err, results) => {
-        if (err) {
-          return res.status(500).json({ error: err.message });
-        }
+        "INSERT INTO users (name, email, password, profile_picture) VALUES (?, ?, ?, ?)";
+      db.query(
+        insertSql,
+        [name, email, hashedPassword, profilePicture],
+        (err, results) => {
+          if (err) {
+            return res.status(500).json({ error: err.message });
+          }
 
-        res.status(201).json({ message: "User registered" }); // Removed the token generation
-      });
+          res.status(201).json({ message: "User registered" });
+        }
+      );
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -116,15 +153,94 @@ app.post("/login", (req, res) => {
 });
 
 // Endpoint for retrieving registered users
-// Endpoint for retrieving all registered users with their details
 app.get("/users", authenticateToken, (req, res) => {
-  db.query("SELECT name, email FROM users", (err, results) => {
+  db.query("SELECT name, email, profile_picture FROM users", (err, results) => {
     if (err) {
       return res.status(500).json({ error: err.message });
     }
     res.status(200).json(results);
   });
 });
+
+//Endpoint for LogOut
+app.post("/logout", authenticateToken, (req, res) => {
+  const token = req.headers["authorization"]?.split(" ")[1];
+
+  db.query(
+    "INSERT INTO blacklist (token) VALUES (?)",
+    [token],
+    (err, results) => {
+      if (err) {
+        return res.status(500).json({ error: err.message });
+      }
+
+      res.status(200).json({ message: "Logout successful" });
+    }
+  );
+});
+
+//Endpoint for profile
+app.get("/profile", authenticateToken, (req, res) => {
+  const userId = req.user.id;
+
+  db.query(
+    "SELECT name, email, profile_picture FROM users WHERE id = ?",
+    [userId],
+    (err, results) => {
+      if (err) {
+        return res.status(500).json({ error: err.message });
+      }
+
+      if (results.length === 0) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      const user = results[0];
+      res.status(200).json(user);
+    }
+  );
+});
+
+// Endpoint for updating user profile
+app.put(
+  "/profile",
+  authenticateToken,
+  upload.single("profile_picture"),
+  (req, res) => {
+    const userId = req.user.id;
+    const { name } = req.body;
+    const profilePicture = req.file ? req.file.path : null;
+
+    let updateSql = "UPDATE users SET ";
+    const updateFields = [];
+    const updateValues = [];
+
+    if (name) {
+      updateFields.push("name = ?");
+      updateValues.push(name);
+    }
+
+    if (profilePicture) {
+      updateFields.push("profile_picture = ?");
+      updateValues.push(profilePicture);
+    }
+
+    if (updateFields.length === 0) {
+      return res.status(400).json({ error: "No fields to update" });
+    }
+
+    updateSql += updateFields.join(", ") + " WHERE id = ?";
+    updateValues.push(userId);
+
+    db.query(updateSql, updateValues, (err, results) => {
+      if (err) {
+        return res.status(500).json({ error: err.message });
+      }
+
+      res.status(200).json({ message: "Profile updated successfully" });
+    });
+  }
+);
 
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
