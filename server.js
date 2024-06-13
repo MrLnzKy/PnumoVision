@@ -7,6 +7,8 @@ const bodyParser = require("body-parser");
 const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
+const axios = require("axios");
+const FormData = require("form-data");
 
 const app = express();
 app.use(bodyParser.urlencoded({ extended: true }));
@@ -241,6 +243,75 @@ app.put(
     });
   }
 );
+
+// Endpoint untuk menerima data pengguna dan mengirimkan foto ke API kedua
+app.post(
+  "/predict",
+  authenticateToken,
+  upload.single("photo"),
+  async (req, res) => {
+    const { name, gender, age } = req.body;
+    const photo = req.file;
+    const userId = req.user.id; // Mendapatkan user ID dari token
+
+    if (!name || !gender || !age || !photo) {
+      return res.status(400).json({ error: "All fields are required" });
+    }
+
+    try {
+      // Kirim foto ke API kedua
+      const formData = new FormData();
+      formData.append("file", fs.createReadStream(photo.path));
+
+      const response = await axios.post(
+        "https://predict-5cveqbjt2a-et.a.run.app/predict",
+        formData,
+        {
+          headers: formData.getHeaders(),
+        }
+      );
+
+      // Tunggu respons dari API kedua dan kembalikan ke client
+      const probabilities = response.data.probabilities;
+
+      // Simpan hasil prediksi ke database
+      const insertSql =
+        "INSERT INTO predictions (user_id, name, gender, age, photo, probabilities) VALUES (?, ?, ?, ?, ?, ?)";
+      db.query(
+        insertSql,
+        [userId, name, gender, age, photo.path, JSON.stringify(probabilities)],
+        (err, results) => {
+          if (err) {
+            return res.status(500).json({ error: err.message });
+          }
+
+          res
+            .status(200)
+            .json({ message: "Data submitted successfully", probabilities });
+        }
+      );
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  }
+);
+
+// Endpoint untuk mendapatkan riwayat prediksi pengguna
+app.get("/predictions", authenticateToken, (req, res) => {
+  const userId = req.user.id;
+
+  db.query(
+    "SELECT id, name, gender, age, photo, probabilities, created_at FROM predictions WHERE user_id = ? ORDER BY created_at DESC",
+    [userId],
+    (err, results) => {
+      if (err) {
+        return res.status(500).json({ error: err.message });
+      }
+
+      res.status(200).json(results);
+    }
+  );
+});
 
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
